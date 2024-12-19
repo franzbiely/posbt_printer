@@ -5,50 +5,35 @@ import {
   View,
   Text,
   StatusBar,
-  NativeEventEmitter,
-  NativeModules,
   Platform,
   PermissionsAndroid,
   TouchableOpacity,
   FlatList,
   Alert,
 } from 'react-native';
-import BleManager from 'react-native-ble-manager';
+import { BleManager } from 'react-native-ble-plx';
 
-const BleManagerModule = NativeModules.BleManager;
-const bleManagerEmitter = new NativeEventEmitter(BleManagerModule);
+const manager = new BleManager();
 
 const App = () => {
   const [isScanning, setIsScanning] = useState(false);
-  const [devices, setDevices] = useState([]);
+  const [devices, setDevices] = useState(new Map());
 
   useEffect(() => {
-    // Initialize BLE module
-    BleManager.start({ showAlert: false });
-
-    // Add event listeners
-    const listeners = [
-      bleManagerEmitter.addListener(
-        'BleManagerDiscoverPeripheral',
-        handleDiscoverPeripheral
-      ),
-      bleManagerEmitter.addListener('BleManagerStopScan', handleStopScan),
-    ];
-
-    // Request permissions on Android
-    if (Platform.OS === 'android') {
-      requestPermissions();
-    }
+    const subscription = manager.onStateChange((state) => {
+      if (state === 'PoweredOn') {
+        console.log('Bluetooth is powered on');
+      }
+    }, true);
 
     return () => {
-      // Remove event listeners on cleanup
-      listeners.forEach(listener => listener.remove());
+      subscription.remove();
     };
   }, []);
 
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
-      if (Platform.Version >= 31) { // Android 12 or higher
+      if (Platform.Version >= 31) {
         const permissions = [
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
@@ -67,131 +52,91 @@ const App = () => {
           )
         );
 
-        const allGranted = results.every(
+        return results.every(
           result => result === PermissionsAndroid.RESULTS.GRANTED
         );
-
-        if (!allGranted) {
-          Alert.alert(
-            'Permissions Required',
-            'This app requires Bluetooth and Location permissions to function properly'
-          );
-        }
-      } else { // Android 11 or lower
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-          {
-            title: 'Location Permission',
-            message: 'This app needs access to location for Bluetooth scanning.',
-            buttonNeutral: 'Ask Me Later',
-            buttonNegative: 'Cancel',
-            buttonPositive: 'OK',
-          }
-        );
-        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-          Alert.alert('Permission denied');
-        }
       }
     }
+    return true;
   };
 
-  const handleDiscoverPeripheral = peripheral => {
-    if (!peripheral.name) {
-      peripheral.name = 'Unknown Device';
+  const startScan = async () => {
+    const hasPermissions = await requestPermissions();
+    if (!hasPermissions) {
+      Alert.alert('Permissions Required', 'Please grant the required permissions');
+      return;
     }
-    setDevices(prevDevices => {
-      const devices = [...prevDevices];
-      const index = devices.findIndex(device => device.id === peripheral.id);
-      if (index === -1) {
-        devices.push(peripheral);
-      }
-      return devices;
-    });
-  };
 
-  const handleStopScan = () => {
-    setIsScanning(false);
-    console.log('Scan stopped');
-  };
-
-  const startScan = () => {
     if (!isScanning) {
-      setDevices([]);
+      setDevices(new Map());
       setIsScanning(true);
-      BleManager.scan([], 5, false)
-        .then(() => {
-          console.log('Scanning...');
-        })
-        .catch(err => {
-          console.error(err);
-        });
-    }
-  };
 
-  const sendMessage = async device => {
-    try {
-      // Connect to device
-      await BleManager.connect(device.id);
-      console.log(`Connected to ${device.name}`);
+      manager.startDeviceScan(null, null, (error, device) => {
+        if (error) {
+          console.error('Scan error:', error);
+          setIsScanning(false);
+          return;
+        }
 
-      // Get device services and characteristics
-      const services = await BleManager.retrieveServices(device.id);
-      console.log('Available Services:', services);
-
-      // Log all services and their characteristics
-      services.services.forEach(serviceUUID => {
-        console.log(`\nService: ${serviceUUID}`);
-        const characteristics = services.characteristics[serviceUUID];
-        if (characteristics) {
-          characteristics.forEach(characteristic => {
-            console.log(`  Characteristic: ${characteristic.characteristic}`);
-            console.log(`  Properties: ${JSON.stringify(characteristic.properties)}`);
+        if (device) {
+          setDevices(prevDevices => {
+            const newDevices = new Map(prevDevices);
+            newDevices.set(device.id, device);
+            return newDevices;
           });
         }
       });
 
-      // Look for a writable characteristic
-      let foundService = null;
-      let foundCharacteristic = null;
+      // Stop scanning after 10 seconds
+      setTimeout(() => {
+        manager.stopDeviceScan();
+        setIsScanning(false);
+      }, 10000);
+    }
+  };
 
-      for (const serviceUUID of services.services) {
-        const characteristics = services.characteristics[serviceUUID];
-        if (characteristics) {
-          const writableCharacteristic = characteristics.find(
-            char => char.properties.Write || char.properties.WriteWithoutResponse
-          );
-          if (writableCharacteristic) {
-            foundService = serviceUUID;
-            foundCharacteristic = writableCharacteristic.characteristic;
+  const sendMessage = async (device) => {
+    try {
+      console.log('Connecting to device:', device.name);
+      const connectedDevice = await device.connect();
+      console.log('Connected, discovering services and characteristics...');
+      
+      const discoveredDevice = await connectedDevice.discoverAllServicesAndCharacteristics();
+      const services = await discoveredDevice.services();
+      
+      console.log('Services:', services);
+      
+      for (const service of services) {
+        console.log('Service UUID:', service.uuid);
+        const characteristics = await service.characteristics();
+        
+        for (const characteristic of characteristics) {
+          console.log('Characteristic UUID:', characteristic.uuid);
+          console.log('Properties:', characteristic.properties);
+          
+          if (characteristic.properties.write || characteristic.properties.writeWithoutResponse) {
+            console.log('Found writable characteristic:', characteristic.uuid);
+            
+            // Convert string to base64
+            const message = Buffer.from('Hello World').toString('base64');
+            
+            await discoveredDevice.writeCharacteristicWithResponse(
+              service.uuid,
+              characteristic.uuid,
+              message
+            );
+            
+            console.log('Message sent successfully');
+            Alert.alert('Success', 'Message sent successfully');
             break;
           }
         }
       }
-
-      if (foundService && foundCharacteristic) {
-        // Convert string to bytes
-        const message = 'Hello World';
-        const bytes = Array.from(message).map(char => char.charCodeAt(0));
-
-        // Write the message
-        await BleManager.write(
-          device.id,
-          foundService,
-          foundCharacteristic,
-          bytes
-        );
-
-        console.log('Message sent successfully');
-        Alert.alert('Success', 'Message sent successfully');
-      } else {
-        throw new Error('No writable characteristic found');
-      }
-
-      // Disconnect from device
-      await BleManager.disconnect(device.id);
+      
+      await discoveredDevice.cancelConnection();
     } catch (error) {
-      console.error(error);
-      Alert.alert('Error', error.message || 'Failed to send message');
+      console.error('Error:', error);
+      Alert.alert('Error', error.message);
     }
   };
 
@@ -199,11 +144,13 @@ const App = () => {
     <TouchableOpacity
       style={styles.deviceItem}
       onPress={() => sendMessage(item)}>
-      <Text style={styles.deviceName}>{item.name}</Text>
+      <Text style={styles.deviceName}>{item.name || 'Unknown Device'}</Text>
       <Text style={styles.deviceInfo}>RSSI: {item.rssi}</Text>
       <Text style={styles.deviceInfo}>ID: {item.id}</Text>
     </TouchableOpacity>
   );
+
+  const deviceArray = Array.from(devices.values());
 
   return (
     <>
@@ -220,7 +167,7 @@ const App = () => {
           </TouchableOpacity>
 
           <FlatList
-            data={devices}
+            data={deviceArray}
             renderItem={renderItem}
             keyExtractor={item => item.id}
             contentContainerStyle={styles.deviceList}
