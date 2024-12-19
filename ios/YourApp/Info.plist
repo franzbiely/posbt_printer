@@ -1,1 +1,4 @@
- 
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>Our app uses bluetooth to find and connect to nearby devices</string>
+<key>NSBluetoothPeripheralUsageDescription</key>
+<string>Our app uses bluetooth to find and connect to nearby devices</string> 
